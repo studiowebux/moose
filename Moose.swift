@@ -23,7 +23,7 @@ import OSLog
 let log = Logger(subsystem: "com.studiowebux.moose", category: "scroll")
 
 // --- Tune these ---
-let PIXELS_PER_CLICK: Double = 20.0  // base scroll distance per wheel tick (tune to taste: 10–40)
+let PIXELS_PER_CLICK: Double = 10.0  // base scroll distance per wheel tick (tune to taste: 10–40)
 let DECAY: Double            = 0.80  // momentum decay per frame (0.7=short, 0.85=long)
 let REVERSE_MOUSE_SCROLL     = false
 // ------------------
@@ -33,17 +33,22 @@ let FRAME_INTERVAL       = 1.0 / 60.0
 
 var velocity: Double = 0.0
 var momentumTimer: DispatchSourceTimer?
-var scrollOrigin: CGPoint = .zero   // cursor position when scrolling started
+var scrollOrigin: CGPoint = .zero
+var scrollApp: pid_t = 0
+var currentApp: pid_t = 0
 let momentumQueue = DispatchQueue(label: "com.studiowebux.moose.momentum")
 
 var eventTap: CFMachPort?
 
 func postSyntheticScroll(deltaY: Double) {
-    // Cancel if cursor moved far enough from scroll origin to likely be in another window
     let pos = NSEvent.mouseLocation
     let dx = pos.x - scrollOrigin.x
     let dy = pos.y - scrollOrigin.y
-    if dx * dx + dy * dy > 2500 {  // ~50px
+    let movedWindow = dx * dx + dy * dy > 2500
+    let switchedApp = currentApp != scrollApp
+    let flags = CGEventSource.flagsState(.combinedSessionState)
+    let cmdHeld = flags.rawValue & CGEventFlags.maskCommand.rawValue != 0
+    if movedWindow || switchedApp || cmdHeld {
         cancelMomentum()
         return
     }
@@ -71,6 +76,7 @@ func cancelMomentum() {
 func startMomentum(origin: CGPoint) {
     scrollOrigin = origin
     guard momentumTimer == nil else { return }
+    scrollApp = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
     let timer = DispatchSource.makeTimerSource(queue: momentumQueue)
     timer.schedule(deadline: .now(), repeating: FRAME_INTERVAL)
     timer.setEventHandler {
@@ -126,7 +132,9 @@ func installTap() {
         forName: NSWorkspace.didActivateApplicationNotification,
         object: nil,
         queue: .main
-    ) { _ in cancelMomentum() }
+    ) { note in
+        currentApp = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier ?? 0
+    }
 
     guard let tap = CGEvent.tapCreate(
         tap: .cgSessionEventTap,
