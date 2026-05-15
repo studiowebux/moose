@@ -39,6 +39,7 @@ let MIN_VELOCITY: Double = 8.0  // px/sec — below this momentum stops
 
 var velocity: Double      = 0.0
 var displayLink: CADisplayLink?
+var scrollEventSource     = CGEventSource(stateID: .combinedSessionState)
 var scrollOrigin: CGPoint = .zero
 
 class ScrollDriver: NSObject {
@@ -73,7 +74,7 @@ func postSyntheticScroll(deltaY: Double) {
         cancelMomentum()
         return
     }
-    guard let src = CGEventSource(stateID: .combinedSessionState),
+    guard let src = scrollEventSource,
           let event = CGEvent(
               scrollWheelEvent2Source: src,
               units: .pixel,
