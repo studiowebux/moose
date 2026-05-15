@@ -13,11 +13,12 @@
 // GNU General Public License for more details.
 //
 // https://www.gnu.org/licenses/gpl-3.0.html
-// Compile: /usr/bin/swiftc Moose.swift -o Moose
+// Compile: /usr/bin/swiftc Moose.swift -o Moose -framework IOKit -framework Cocoa
 // Requires: System Settings > Privacy & Security > Accessibility
 
 import Cocoa
 import CoreGraphics
+import IOKit.hid
 import OSLog
 
 let log = Logger(subsystem: "com.studiowebux.moose", category: "scroll")
@@ -31,14 +32,18 @@ let REVERSE_MOUSE_SCROLL     = false
 let MIN_VELOCITY: Double = 0.8
 let FRAME_INTERVAL       = 1.0 / 60.0
 
-var velocity: Double = 0.0
+var velocity: Double    = 0.0
 var momentumTimer: DispatchSourceTimer?
 var scrollOrigin: CGPoint = .zero
-var scrollApp: pid_t = 0
-var currentApp: pid_t = 0
+var scrollApp: pid_t    = 0
+var currentApp: pid_t   = 0
+var connectedMice: Int  = 0
+var hidManager: IOHIDManager?
 let momentumQueue = DispatchQueue(label: "com.studiowebux.moose.momentum")
 
 var eventTap: CFMachPort?
+
+// MARK: - Scroll
 
 func postSyntheticScroll(deltaY: Double) {
     let pos = NSEvent.mouseLocation
@@ -46,13 +51,12 @@ func postSyntheticScroll(deltaY: Double) {
     let dy = pos.y - scrollOrigin.y
     let movedWindow = dx * dx + dy * dy > 2500
     let switchedApp = currentApp != scrollApp
-    let flags = CGEventSource.flagsState(.combinedSessionState)
-    let cmdHeld = flags.rawValue & CGEventFlags.maskCommand.rawValue != 0
+    let flags       = CGEventSource.flagsState(.combinedSessionState)
+    let cmdHeld     = flags.rawValue & CGEventFlags.maskCommand.rawValue != 0
     if movedWindow || switchedApp || cmdHeld {
         cancelMomentum()
         return
     }
-
     guard let src = CGEventSource(stateID: .combinedSessionState),
           let event = CGEvent(
               scrollWheelEvent2Source: src,
@@ -60,7 +64,6 @@ func postSyntheticScroll(deltaY: Double) {
               wheelCount: 1,
               wheel1: 0, wheel2: 0, wheel3: 0
           ) else { return }
-
     event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
     event.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: deltaY)
     event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: deltaY / 10.0)
@@ -80,10 +83,7 @@ func startMomentum(origin: CGPoint) {
     let timer = DispatchSource.makeTimerSource(queue: momentumQueue)
     timer.schedule(deadline: .now(), repeating: FRAME_INTERVAL)
     timer.setEventHandler {
-        guard abs(velocity) >= MIN_VELOCITY else {
-            cancelMomentum()
-            return
-        }
+        guard abs(velocity) >= MIN_VELOCITY else { cancelMomentum(); return }
         let delta = velocity
         velocity *= DECAY
         postSyntheticScroll(deltaY: delta)
@@ -92,40 +92,84 @@ func startMomentum(origin: CGPoint) {
     momentumTimer = timer
 }
 
+// MARK: - Event tap
+
 let eventMask: CGEventMask = 1 << CGEventType.scrollWheel.rawValue
 
 let tapCallback: CGEventTapCallBack = { proxy, type, event, _ in
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-        if let tap = eventTap {
+        if connectedMice > 0, let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: true)
             log.warning("Event tap was disabled by macOS — re-enabled.")
         }
         return nil
     }
-
     guard type == .scrollWheel else { return Unmanaged.passRetained(event) }
-
     let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous)
     guard isContinuous == 0 else { return Unmanaged.passRetained(event) }
-
     let rawY = event.getIntegerValueField(.scrollWheelEventScrollCount) != 0
         ? event.getIntegerValueField(.scrollWheelEventScrollCount)
         : event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
-
     guard rawY != 0 else { return Unmanaged.passRetained(event) }
-
     let direction: Double = REVERSE_MOUSE_SCROLL ? -1.0 : 1.0
     let impulse = Double(rawY) * PIXELS_PER_CLICK * direction
-
-    // Direction changed — cancel current momentum and start fresh
     if velocity != 0 && (impulse > 0) != (velocity > 0) { cancelMomentum() }
-
     velocity += impulse
     velocity = max(-300, min(300, velocity))
-
     startMomentum(origin: NSEvent.mouseLocation)
     return nil
 }
+
+// MARK: - IOKit mouse detection
+
+let mouseConnected: IOHIDDeviceCallback = { _, _, _, device in
+    let transport = IOHIDDeviceGetProperty(device, kIOHIDTransportKey as CFString) as? String ?? "unknown"
+    let product   = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "unknown"
+    log.debug("Device seen: \(product) transport=\(transport)")
+    guard transport == "USB" || transport == "Bluetooth" || transport == "AmbiguousNonBluetooth" else {
+        log.debug("Ignored: \(product) transport=\(transport)")
+        return
+    }
+    connectedMice += 1
+    log.info("Mouse connected: \(product) (\(transport)) — total: \(connectedMice)")
+    if connectedMice == 1, let tap = eventTap {
+        CGEvent.tapEnable(tap: tap, enable: true)
+        log.info("Tap enabled.")
+    }
+}
+
+let mouseDisconnected: IOHIDDeviceCallback = { _, _, _, device in
+    let transport = IOHIDDeviceGetProperty(device, kIOHIDTransportKey as CFString) as? String ?? "unknown"
+    let product   = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "unknown"
+    log.debug("Device removed: \(product) transport=\(transport)")
+    guard transport == "USB" || transport == "Bluetooth" || transport == "AmbiguousNonBluetooth" else { return }
+    connectedMice = max(0, connectedMice - 1)
+    log.info("Mouse disconnected: \(product) (\(transport)) — total: \(connectedMice)")
+    if connectedMice == 0, let tap = eventTap {
+        cancelMomentum()
+        CGEvent.tapEnable(tap: tap, enable: false)
+        log.info("Tap disabled — no external mice connected.")
+    }
+}
+
+func setupMouseDetection() {
+    let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+    hidManager = manager
+    // Match both mouse (0x02) and pointer (0x01) usages — some mice report as pointer
+    let matchingArray = [
+        [kIOHIDDeviceUsagePageKey as String: kHIDPage_GenericDesktop,
+         kIOHIDDeviceUsageKey as String:     kHIDUsage_GD_Mouse],
+        [kIOHIDDeviceUsagePageKey as String: kHIDPage_GenericDesktop,
+         kIOHIDDeviceUsageKey as String:     kHIDUsage_GD_Pointer]
+    ] as CFArray
+    IOHIDManagerSetDeviceMatchingMultiple(manager, matchingArray)
+    IOHIDManagerRegisterDeviceMatchingCallback(manager, mouseConnected, nil)
+    IOHIDManagerRegisterDeviceRemovalCallback(manager, mouseDisconnected, nil)
+    IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
+    IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+}
+
+// MARK: - Boot
 
 func installTap() {
     NSWorkspace.shared.notificationCenter.addObserver(
@@ -150,8 +194,12 @@ func installTap() {
     eventTap = tap
     let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-    CGEvent.tapEnable(tap: tap, enable: true)
-    log.info("Moose running — momentum scroll active. Trackpad unchanged.")
+
+    // Start disabled — IOKit will enable it if a mouse is already connected
+    CGEvent.tapEnable(tap: tap, enable: false)
+
+    setupMouseDetection()
+    log.info("Moose running — tap disabled until external mouse detected.")
 }
 
 let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
@@ -159,12 +207,19 @@ if AXIsProcessTrustedWithOptions(options) {
     installTap()
 } else {
     log.warning("Waiting for Accessibility access — grant it in System Settings then Moose will start automatically.")
-    DispatchQueue.global(qos: .background).async {
-        while !AXIsProcessTrusted() {
-            Thread.sleep(forTimeInterval: 0.5)
-        }
+    DistributedNotificationCenter.default().addObserver(
+        forName: NSNotification.Name("com.apple.accessibility.api"),
+        object: nil,
+        queue: .main
+    ) { _ in
+        guard AXIsProcessTrusted() else { return }
+        DistributedNotificationCenter.default().removeObserver(
+            DistributedNotificationCenter.default(),
+            name: NSNotification.Name("com.apple.accessibility.api"),
+            object: nil
+        )
         log.info("Accessibility granted — starting.")
-        DispatchQueue.main.async { installTap() }
+        installTap()
     }
 }
 

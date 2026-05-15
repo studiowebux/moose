@@ -10,7 +10,7 @@ LAUNCH_AGENTS = $(HOME)/Library/LaunchAgents
 all: $(BIN)
 
 $(BIN): $(SRC)
-	$(SWIFTC) $(SRC) -o $(BIN)
+	$(SWIFTC) $(SRC) -o $(BIN) -framework IOKit -framework Cocoa
 
 
 install: $(BIN)
