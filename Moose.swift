@@ -68,8 +68,7 @@ func postSyntheticScroll(deltaY: Double) {
     let dy = pos.y - scrollOrigin.y
     let movedWindow = CANCEL_ON_MOUSE_MOVE && dx * dx + dy * dy > 2500
     let switchedApp = currentApp != scrollApp
-    let flags       = CGEventSource.flagsState(.combinedSessionState)
-    let cmdHeld     = flags.rawValue & CGEventFlags.maskCommand.rawValue != 0
+    let cmdHeld     = CGEventSource.flagsState(.combinedSessionState).contains(.maskCommand)
     if movedWindow || switchedApp || cmdHeld {
         cancelMomentum()
         return
@@ -117,9 +116,8 @@ let tapCallback: CGEventTapCallBack = { proxy, type, event, _ in
     guard type == .scrollWheel else { return Unmanaged.passRetained(event) }
     let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous)
     guard isContinuous == 0 else { return Unmanaged.passRetained(event) }
-    let rawY = event.getIntegerValueField(.scrollWheelEventScrollCount) != 0
-        ? event.getIntegerValueField(.scrollWheelEventScrollCount)
-        : event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+    let scrollCount = event.getIntegerValueField(.scrollWheelEventScrollCount)
+    let rawY = scrollCount != 0 ? scrollCount : event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
     guard rawY != 0 else { return Unmanaged.passRetained(event) }
     let direction: Double = REVERSE_MOUSE_SCROLL ? -1.0 : 1.0
     let impulse = Double(rawY) * PIXELS_PER_CLICK * direction
@@ -132,14 +130,15 @@ let tapCallback: CGEventTapCallBack = { proxy, type, event, _ in
 
 // MARK: - IOKit mouse detection
 
+func externalMouseInfo(_ device: IOHIDDevice) -> (product: String, transport: String)? {
+    let t = IOHIDDeviceGetProperty(device, kIOHIDTransportKey as CFString) as? String ?? "unknown"
+    guard t == "USB" || t == "Bluetooth" || t == "AmbiguousNonBluetooth" else { return nil }
+    let p = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "unknown"
+    return (p, t)
+}
+
 let mouseConnected: IOHIDDeviceCallback = { _, _, _, device in
-    let transport = IOHIDDeviceGetProperty(device, kIOHIDTransportKey as CFString) as? String ?? "unknown"
-    let product   = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "unknown"
-    log.debug("Device seen: \(product) transport=\(transport)")
-    guard transport == "USB" || transport == "Bluetooth" || transport == "AmbiguousNonBluetooth" else {
-        log.debug("Ignored: \(product) transport=\(transport)")
-        return
-    }
+    guard let (product, transport) = externalMouseInfo(device) else { return }
     connectedMice += 1
     log.info("Mouse connected: \(product) (\(transport)) — total: \(connectedMice)")
     if connectedMice == 1, let tap = eventTap {
@@ -149,10 +148,7 @@ let mouseConnected: IOHIDDeviceCallback = { _, _, _, device in
 }
 
 let mouseDisconnected: IOHIDDeviceCallback = { _, _, _, device in
-    let transport = IOHIDDeviceGetProperty(device, kIOHIDTransportKey as CFString) as? String ?? "unknown"
-    let product   = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "unknown"
-    log.debug("Device removed: \(product) transport=\(transport)")
-    guard transport == "USB" || transport == "Bluetooth" || transport == "AmbiguousNonBluetooth" else { return }
+    guard let (product, transport) = externalMouseInfo(device) else { return }
     connectedMice = max(0, connectedMice - 1)
     log.info("Mouse disconnected: \(product) (\(transport)) — total: \(connectedMice)")
     if connectedMice == 0, let tap = eventTap {
