@@ -20,26 +20,43 @@ import Cocoa
 import CoreGraphics
 import IOKit.hid
 import OSLog
+import QuartzCore
 
 let log = Logger(subsystem: "com.studiowebux.moose", category: "scroll")
 
 // --- Tune these ---
-let PIXELS_PER_CLICK: Double = 10.0  // base scroll distance per wheel tick (tune to taste: 10–40)
-let DECAY: Double            = 0.80  // momentum decay per frame (0.7=short, 0.85=long)
+let PIXELS_PER_CLICK: Double = 300.0  // velocity impulse (px/sec) added per wheel tick
+let FRICTION: Double         = 2.5    // deceleration rate; half-life = ln(2)/FRICTION sec
+                                      //   1.0 = very long glide (~700ms half-life)
+                                      //   2.5 = Apple-like  (~280ms half-life)
+                                      //   5.0 = short snap  (~140ms half-life)
+let MAX_VELOCITY: Double     = 4000.0 // px/sec cap
+let CANCEL_ON_MOUSE_MOVE     = false  // true = cancel momentum if cursor moves during glide
 let REVERSE_MOUSE_SCROLL     = false
 // ------------------
 
-let MIN_VELOCITY: Double = 0.8
-let FRAME_INTERVAL       = 1.0 / 60.0
+let MIN_VELOCITY: Double = 8.0  // px/sec — below this momentum stops
 
-var velocity: Double    = 0.0
-var momentumTimer: DispatchSourceTimer?
+var velocity: Double      = 0.0
+var displayLink: CADisplayLink?
 var scrollOrigin: CGPoint = .zero
-var scrollApp: pid_t    = 0
-var currentApp: pid_t   = 0
-var connectedMice: Int  = 0
+
+class ScrollDriver: NSObject {
+    @objc func tick(_ link: CADisplayLink) {
+        let dt = link.targetTimestamp - link.timestamp
+        guard abs(velocity) >= MIN_VELOCITY else { cancelMomentum(); return }
+        let decay = exp(-FRICTION * dt)
+        // exact integral of v(t)=v0·e^(-F·t) over [0,dt] — no stepping artifact
+        let delta = velocity * (1.0 - decay) / FRICTION
+        velocity *= decay
+        postSyntheticScroll(deltaY: delta)
+    }
+}
+let scrollDriver = ScrollDriver()
+var scrollApp: pid_t      = 0
+var currentApp: pid_t     = 0
+var connectedMice: Int    = 0
 var hidManager: IOHIDManager?
-let momentumQueue = DispatchQueue(label: "com.studiowebux.moose.momentum")
 
 var eventTap: CFMachPort?
 
@@ -49,7 +66,7 @@ func postSyntheticScroll(deltaY: Double) {
     let pos = NSEvent.mouseLocation
     let dx = pos.x - scrollOrigin.x
     let dy = pos.y - scrollOrigin.y
-    let movedWindow = dx * dx + dy * dy > 2500
+    let movedWindow = CANCEL_ON_MOUSE_MOVE && dx * dx + dy * dy > 2500
     let switchedApp = currentApp != scrollApp
     let flags       = CGEventSource.flagsState(.combinedSessionState)
     let cmdHeld     = flags.rawValue & CGEventFlags.maskCommand.rawValue != 0
@@ -71,25 +88,18 @@ func postSyntheticScroll(deltaY: Double) {
 }
 
 func cancelMomentum() {
-    momentumTimer?.cancel()
-    momentumTimer = nil
+    displayLink?.invalidate()
+    displayLink = nil
     velocity = 0
 }
 
 func startMomentum(origin: CGPoint) {
     scrollOrigin = origin
-    guard momentumTimer == nil else { return }
+    guard displayLink == nil else { return }
     scrollApp = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-    let timer = DispatchSource.makeTimerSource(queue: momentumQueue)
-    timer.schedule(deadline: .now(), repeating: FRAME_INTERVAL)
-    timer.setEventHandler {
-        guard abs(velocity) >= MIN_VELOCITY else { cancelMomentum(); return }
-        let delta = velocity
-        velocity *= DECAY
-        postSyntheticScroll(deltaY: delta)
-    }
-    timer.resume()
-    momentumTimer = timer
+    guard let link: CADisplayLink = NSScreen.main?.displayLink(target: scrollDriver, selector: #selector(ScrollDriver.tick(_:))) else { return }
+    link.add(to: RunLoop.main, forMode: RunLoop.Mode.common)
+    displayLink = link
 }
 
 // MARK: - Event tap
@@ -115,7 +125,7 @@ let tapCallback: CGEventTapCallBack = { proxy, type, event, _ in
     let impulse = Double(rawY) * PIXELS_PER_CLICK * direction
     if velocity != 0 && (impulse > 0) != (velocity > 0) { cancelMomentum() }
     velocity += impulse
-    velocity = max(-300, min(300, velocity))
+    velocity = max(-MAX_VELOCITY, min(MAX_VELOCITY, velocity))
     startMomentum(origin: NSEvent.mouseLocation)
     return nil
 }

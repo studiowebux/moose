@@ -52,20 +52,30 @@ make restart
 All settings are at the top of `Moose.swift`. Edit then `make uninstall && make clean && make && make install`.
 
 ```swift
-let PIXELS_PER_CLICK: Double = 10.0
+let PIXELS_PER_CLICK: Double = 300.0
 ```
-How far the page moves per wheel tick, in pixels.
-- `10` — default, comfortable
-- `20` — faster
-- `40` — fast
+Velocity impulse added per wheel tick, in pixels/sec. Think of this as how hard each tick "kicks" the scroll.
+- `150` — light, short flicks
+- `300` — default, Apple-like feel
+- `500` — heavy, each tick sends you flying
 
 ```swift
-let DECAY: Double = 0.80
+let FRICTION: Double = 2.5
 ```
-How long the momentum glide lasts after you stop spinning.
-- `0.70` — snappy, stops quickly
-- `0.80` — default, natural feel
-- `0.88` — floaty, long glide
+Deceleration rate. The glide half-life is `ln(2) / FRICTION` seconds — how long it takes to lose half its speed.
+- `1.0` — very long glide (~700 ms half-life), floaty
+- `2.5` — default, matches Apple trackpad momentum
+- `5.0` — snappy, stops quickly (~140 ms half-life)
+
+```swift
+let MAX_VELOCITY: Double = 4000.0
+```
+Speed cap in pixels/sec. Prevents runaway scrolling when spinning the wheel rapidly.
+
+```swift
+let CANCEL_ON_MOUSE_MOVE: Bool = false
+```
+When `true`, moving the cursor during a glide cancels the momentum immediately. Default is `false` — momentum continues even if you move the mouse, which avoids side effects when nudging the mouse while reading.
 
 ```swift
 let REVERSE_MOUSE_SCROLL: Bool = false
@@ -95,7 +105,7 @@ Shows all events including device detection (plug/unplug), tap enable/disable, a
 
 ## Security
 
-**Frameworks used:** `Cocoa`, `CoreGraphics`, `IOKit`, `OSLog` — no third-party code, no network access, no file access.
+**Frameworks used:** `Cocoa`, `CoreGraphics`, `IOKit`, `OSLog`, `QuartzCore` — no third-party code, no network access, no file access.
 
 **Event tap scope:** intercepts scroll wheel events only. The event mask is hardcoded — it cannot see keyboard input, mouse clicks, or pointer movement. The tap is fully disabled when no external mouse is connected.
 
