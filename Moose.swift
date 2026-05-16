@@ -25,8 +25,8 @@ import QuartzCore
 let log = Logger(subsystem: "com.studiowebux.moose", category: "scroll")
 
 // --- Tune these ---
-let PIXELS_PER_CLICK: Double = 300.0  // velocity impulse (px/sec) added per wheel tick
-let FRICTION: Double         = 2.5    // deceleration rate; half-life = ln(2)/FRICTION sec
+let PIXELS_PER_CLICK: Double = 50.0  // velocity impulse (px/sec) added per wheel tick
+let FRICTION: Double         = 5.0    // deceleration rate; half-life = ln(2)/FRICTION sec
                                       //   1.0 = very long glide (~700ms half-life)
                                       //   2.5 = Apple-like  (~280ms half-life)
                                       //   5.0 = short snap  (~140ms half-life)
