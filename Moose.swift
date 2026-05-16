@@ -23,11 +23,12 @@ import OSLog
 import QuartzCore
 
 let log = Logger(subsystem: "com.studiowebux.moose", category: "scroll")
+let MOOSE_VERSION = "1.2.1"
 
 // MARK: - Config
 
 let CONFIG_PATH: String = FileManager.default
-    .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
     .appendingPathComponent("moose/config.json").path
 
 var PIXELS_PER_CLICK: Double = 200.0  // velocity impulse (px/sec) added per wheel tick
@@ -45,7 +46,7 @@ func loadConfig() {
     do {
         data = try Data(contentsOf: url)
     } catch {
-        log.error("Config: could not read file — \(error.localizedDescription)")
+        log.error("Config: could not read file — \(error.localizedDescription, privacy: .public)")
         return
     }
     let json: [String: Any]
@@ -56,14 +57,14 @@ func loadConfig() {
         }
         json = parsed
     } catch {
-        log.error("Config: invalid JSON — \(error.localizedDescription)")
+        log.error("Config: invalid JSON — \(error.localizedDescription, privacy: .public)")
         return
     }
     var warnings: [String] = []
     func load<T>(_ key: String, into setter: (T) -> Void) {
         guard let raw = json[key] else { return }
         if let v = raw as? T { setter(v) }
-        else { warnings.append("\(key): expected \(T.self), got \(type(of: raw))") }
+        else { warnings.append("\(key): expected \(T.self), got \(type(of: raw)) — key ignored") }
     }
     load("pixelsPerClick")          { PIXELS_PER_CLICK = $0 }
     load("friction")                { FRICTION = $0 }
@@ -73,8 +74,21 @@ func loadConfig() {
     load("cancelOnMouseMove")       { CANCEL_ON_MOUSE_MOVE = $0 }
     load("reverseScroll")           { REVERSE_MOUSE_SCROLL = $0 }
     load("debug")                   { DEBUG_OVERLAY = $0 }
+    // Clamp numeric values to safe ranges — e.g. friction must be > 0 or
+    // the momentum integral in ScrollDriver.tick divides by zero (NaN deltas).
+    func clamp(_ name: String, _ value: inout Double, min lo: Double) {
+        if !value.isFinite || value < lo {
+            warnings.append("\(name): \(value) out of range — clamped to \(lo)")
+            value = lo
+        }
+    }
+    clamp("friction",                   &FRICTION,                       min: 0.1)
+    clamp("maxVelocity",                &MAX_VELOCITY,                   min: 1)
+    clamp("minVelocity",                &MIN_VELOCITY,                   min: 1)
+    clamp("pixelsPerClick",             &PIXELS_PER_CLICK,               min: 0)
+    clamp("cancelOnMouseMoveThreshold", &CANCEL_ON_MOUSE_MOVE_THRESHOLD, min: 0)
+    for w in warnings { log.warning("Config: \(w, privacy: .public)") }
     DebugOverlay.shared.setVisible(DEBUG_OVERLAY)
-    for w in warnings { log.warning("Config: \(w) — key ignored") }
     log.info("Config loaded — pixelsPerClick:\(PIXELS_PER_CLICK) friction:\(FRICTION) maxVelocity:\(MAX_VELOCITY) minVelocity:\(MIN_VELOCITY) cancelOnMouseMove:\(CANCEL_ON_MOUSE_MOVE) threshold:\(CANCEL_ON_MOUSE_MOVE_THRESHOLD) reverseScroll:\(REVERSE_MOUSE_SCROLL)")
 }
 
@@ -83,18 +97,21 @@ func writeDefaultConfig() {
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     guard !FileManager.default.fileExists(atPath: CONFIG_PATH) else { return }
     let defaults: [String: Any] = [
-        "pixelsPerClick": PIXELS_PER_CLICK,
-        "friction": FRICTION,
-        "maxVelocity": MAX_VELOCITY,
-        "minVelocity": MIN_VELOCITY,
-        "cancelOnMouseMove": CANCEL_ON_MOUSE_MOVE,
+        "pixelsPerClick":             PIXELS_PER_CLICK,
+        "friction":                   FRICTION,
+        "maxVelocity":                MAX_VELOCITY,
+        "minVelocity":                MIN_VELOCITY,
+        "cancelOnMouseMove":          CANCEL_ON_MOUSE_MOVE,
         "cancelOnMouseMoveThreshold": CANCEL_ON_MOUSE_MOVE_THRESHOLD,
-        "reverseScroll": REVERSE_MOUSE_SCROLL,
-        "debug": DEBUG_OVERLAY
+        "reverseScroll":              REVERSE_MOUSE_SCROLL,
+        "debug":                      DEBUG_OVERLAY
     ]
-    if let data = try? JSONSerialization.data(withJSONObject: defaults, options: .prettyPrinted) {
-        try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))
-        log.info("Default config written to \(CONFIG_PATH)")
+    do {
+        let data = try JSONSerialization.data(withJSONObject: defaults, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: URL(fileURLWithPath: CONFIG_PATH))
+        log.info("Default config written to \(CONFIG_PATH, privacy: .public)")
+    } catch {
+        log.error("Config: could not write defaults — \(error.localizedDescription, privacy: .public)")
     }
 }
 
@@ -141,8 +158,6 @@ class DebugOverlay {
     private var label: NSTextField?
     private var ringWindow: NSWindow?
     private var ringView: CursorRingView?
-    private var mouseMonitor: Any?
-
     func setVisible(_ visible: Bool) {
         if visible { show() } else { hide() }
     }
@@ -168,14 +183,15 @@ class DebugOverlay {
         w.isOpaque = false
         w.ignoresMouseEvents = true
         w.collectionBehavior = [.canJoinAllSpaces, .stationary]
-        w.contentView?.wantsLayer = true
-        w.contentView?.layer?.cornerRadius = 10
-        let field = NSTextField(frame: w.contentView!.bounds.insetBy(dx: 10, dy: 10))
+        guard let contentView = w.contentView else { return }
+        contentView.wantsLayer = true
+        contentView.layer?.cornerRadius = 10
+        let field = NSTextField(frame: contentView.bounds.insetBy(dx: 10, dy: 10))
         field.isEditable = false; field.isBordered = false; field.drawsBackground = false
         field.textColor = .white
         field.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         field.autoresizingMask = [.width, .height]
-        w.contentView?.addSubview(field)
+        contentView.addSubview(field)
         w.makeKeyAndOrderFront(nil)
         infoWindow = w; label = field
     }
@@ -190,8 +206,9 @@ class DebugOverlay {
         w.isOpaque = false
         w.ignoresMouseEvents = true
         w.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        guard let ringContent = w.contentView else { return }
         let v = CursorRingView(frame: NSRect(x: 0, y: 0, width: size, height: size))
-        w.contentView?.addSubview(v)
+        ringContent.addSubview(v)
         w.makeKeyAndOrderFront(nil)
         ringWindow = w; ringView = v
     }
@@ -228,7 +245,7 @@ class DebugOverlay {
 
 var velocity: Double        = 0.0
 var displayLink: CADisplayLink?
-var scrollEventSource       = CGEventSource(stateID: .combinedSessionState)
+let scrollEventSource       = CGEventSource(stateID: .combinedSessionState)
 var scrollOrigin: CGPoint   = .zero
 
 class ScrollDriver: NSObject {
@@ -271,7 +288,10 @@ func postSyntheticScroll(deltaY: Double) {
               units: .pixel,
               wheelCount: 1,
               wheel1: 0, wheel2: 0, wheel3: 0
-          ) else { return }
+          ) else {
+        log.error("Failed to create synthetic scroll event")
+        return
+    }
     event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
     event.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: deltaY)
     event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: deltaY / 10.0)
@@ -288,8 +308,17 @@ func cancelMomentum() {
 func startMomentum(origin: CGPoint) {
     scrollOrigin = origin
     guard displayLink == nil else { return }
-    scrollApp = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-    guard let link: CADisplayLink = NSScreen.main?.displayLink(target: scrollDriver, selector: #selector(ScrollDriver.tick(_:))) else { return }
+    guard let frontmost = NSWorkspace.shared.frontmostApplication else {
+        velocity = 0
+        return
+    }
+    scrollApp = frontmost.processIdentifier
+    guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+        log.error("Failed to create display link — no screen available")
+        velocity = 0
+        return
+    }
+    let link = screen.displayLink(target: scrollDriver, selector: #selector(ScrollDriver.tick(_:)))
     link.add(to: RunLoop.main, forMode: RunLoop.Mode.common)
     displayLink = link
 }
@@ -309,8 +338,10 @@ let tapCallback: CGEventTapCallBack = { proxy, type, event, _ in
     guard type == .scrollWheel else { return Unmanaged.passRetained(event) }
     let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous)
     guard isContinuous == 0 else { return Unmanaged.passRetained(event) }
+    let deltaY = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
     let scrollCount = event.getIntegerValueField(.scrollWheelEventScrollCount)
-    let rawY = scrollCount != 0 ? scrollCount : event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+    // scrollCount is an unsigned detent count — reapply the sign from the signed delta
+    let rawY = (scrollCount != 0 && deltaY != 0) ? scrollCount * (deltaY < 0 ? -1 : 1) : deltaY
     guard rawY != 0 else { return Unmanaged.passRetained(event) }
     let direction: Double = REVERSE_MOUSE_SCROLL ? -1.0 : 1.0
     let impulse = Double(rawY) * PIXELS_PER_CLICK * direction
@@ -333,7 +364,7 @@ func externalMouseInfo(_ device: IOHIDDevice) -> (product: String, transport: St
 let mouseConnected: IOHIDDeviceCallback = { _, _, _, device in
     guard let (product, transport) = externalMouseInfo(device) else { return }
     connectedMice += 1
-    log.info("Mouse connected: \(product) (\(transport)) — total: \(connectedMice)")
+    log.info("Mouse connected: \(product, privacy: .public) (\(transport, privacy: .public)) — total: \(connectedMice)")
     if connectedMice == 1, let tap = eventTap {
         CGEvent.tapEnable(tap: tap, enable: true)
         log.info("Tap enabled.")
@@ -343,7 +374,7 @@ let mouseConnected: IOHIDDeviceCallback = { _, _, _, device in
 let mouseDisconnected: IOHIDDeviceCallback = { _, _, _, device in
     guard let (product, transport) = externalMouseInfo(device) else { return }
     connectedMice = max(0, connectedMice - 1)
-    log.info("Mouse disconnected: \(product) (\(transport)) — total: \(connectedMice)")
+    log.info("Mouse disconnected: \(product, privacy: .public) (\(transport, privacy: .public)) — total: \(connectedMice)")
     if connectedMice == 0, let tap = eventTap {
         cancelMomentum()
         CGEvent.tapEnable(tap: tap, enable: false)
@@ -398,7 +429,7 @@ func installTap() {
     CGEvent.tapEnable(tap: tap, enable: false)
 
     setupMouseDetection()
-    log.info("Moose running — tap disabled until external mouse detected.")
+    log.info("Moose \(MOOSE_VERSION, privacy: .public) running — tap disabled until external mouse detected.")
 }
 
 writeDefaultConfig()
@@ -410,17 +441,15 @@ if AXIsProcessTrustedWithOptions(options) {
     installTap()
 } else {
     log.warning("Waiting for Accessibility access — grant it in System Settings then Moose will start automatically.")
-    DistributedNotificationCenter.default().addObserver(
+    final class ObserverBox { var token: NSObjectProtocol? }
+    let box = ObserverBox()
+    box.token = DistributedNotificationCenter.default().addObserver(
         forName: NSNotification.Name("com.apple.accessibility.api"),
         object: nil,
         queue: .main
     ) { _ in
         guard AXIsProcessTrusted() else { return }
-        DistributedNotificationCenter.default().removeObserver(
-            DistributedNotificationCenter.default(),
-            name: NSNotification.Name("com.apple.accessibility.api"),
-            object: nil
-        )
+        if let token = box.token { DistributedNotificationCenter.default().removeObserver(token) }
         log.info("Accessibility granted — starting.")
         installTap()
     }

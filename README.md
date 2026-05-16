@@ -66,7 +66,9 @@ The file is created automatically with defaults on first run. Edit it with any t
   "maxVelocity": 3000,
   "minVelocity": 25,
   "cancelOnMouseMove": false,
-  "reverseScroll": false
+  "cancelOnMouseMoveThreshold": 50,
+  "reverseScroll": false,
+  "debug": false
 }
 ```
 
@@ -93,6 +95,9 @@ The file is created automatically with defaults on first run. Edit it with any t
 Accessibility was revoked — happens after every recompile. Re-add `~/.local/bin/Moose` in:
 `System Settings → Privacy & Security → Accessibility`
 Then restart: `make restart`
+
+**A config value seems ignored**
+Out-of-range values are clamped to safe limits when the config loads — for example, `friction` is floored at `0.1` to prevent a divide-by-zero in the momentum math. When this happens the log records a `Config: … out of range — clamped` warning.
 
 **Check recent logs**
 ```bash
