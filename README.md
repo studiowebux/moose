@@ -123,6 +123,8 @@ Shows all events including device detection (plug/unplug), tap enable/disable, a
 
 **Source is auditable:** you compile from source yourself. Trust the code, not the binary.
 
+**Disclaimer:** Moose is provided as-is with no warranty (GPL v3 §15–16) — it taps scroll-wheel events only, but you install and run it at your own risk. The author is not liable for anything, up to and including you finally enjoying your mouse again.
+
 ---
 
 © 2026 Studio Webux — GPL v3
