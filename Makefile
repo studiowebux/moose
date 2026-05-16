@@ -20,6 +20,7 @@ install: $(BIN)
 	sed "s|MOOSE_BIN|$(INSTALL_BIN)|" $(PLIST_NAME) > $(LAUNCH_AGENTS)/$(PLIST_NAME)
 	launchctl load $(LAUNCH_AGENTS)/$(PLIST_NAME)
 	@echo "Moose installed."
+	@echo "Config: $(HOME)/Library/Application Support/moose/config.json"
 	@echo "1. Add ~/.local/bin/Moose in System Settings > Privacy & Security > Accessibility"
 	@echo "2. Toggle it ON, then run: make restart"
 	open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"

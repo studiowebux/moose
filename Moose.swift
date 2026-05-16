@@ -24,23 +24,212 @@ import QuartzCore
 
 let log = Logger(subsystem: "com.studiowebux.moose", category: "scroll")
 
-// --- Tune these ---
-let PIXELS_PER_CLICK: Double = 50.0  // velocity impulse (px/sec) added per wheel tick
-let FRICTION: Double         = 5.0    // deceleration rate; half-life = ln(2)/FRICTION sec
-                                      //   1.0 = very long glide (~700ms half-life)
-                                      //   2.5 = Apple-like  (~280ms half-life)
-                                      //   5.0 = short snap  (~140ms half-life)
-let MAX_VELOCITY: Double     = 4000.0 // px/sec cap
-let CANCEL_ON_MOUSE_MOVE     = false  // true = cancel momentum if cursor moves during glide
-let REVERSE_MOUSE_SCROLL     = false
-// ------------------
+// MARK: - Config
 
-let MIN_VELOCITY: Double = 8.0  // px/sec — below this momentum stops
+let CONFIG_PATH: String = FileManager.default
+    .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    .appendingPathComponent("moose/config.json").path
 
-var velocity: Double      = 0.0
+var PIXELS_PER_CLICK: Double = 200.0  // velocity impulse (px/sec) added per wheel tick
+var FRICTION: Double         = 3.5    // deceleration rate; half-life = ln(2)/FRICTION sec
+var MAX_VELOCITY: Double     = 3000.0 // px/sec cap
+var MIN_VELOCITY: Double     = 25.0   // px/sec — below this momentum stops
+var CANCEL_ON_MOUSE_MOVE           = false  // true = cancel momentum if cursor moves during glide
+var CANCEL_ON_MOUSE_MOVE_THRESHOLD = 50.0   // px radius before momentum cancels
+var REVERSE_MOUSE_SCROLL           = false
+var DEBUG_OVERLAY                  = false
+
+func loadConfig() {
+    let url = URL(fileURLWithPath: CONFIG_PATH)
+    let data: Data
+    do {
+        data = try Data(contentsOf: url)
+    } catch {
+        log.error("Config: could not read file — \(error.localizedDescription)")
+        return
+    }
+    let json: [String: Any]
+    do {
+        guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            log.error("Config: expected a JSON object at top level")
+            return
+        }
+        json = parsed
+    } catch {
+        log.error("Config: invalid JSON — \(error.localizedDescription)")
+        return
+    }
+    var warnings: [String] = []
+    func load<T>(_ key: String, into setter: (T) -> Void) {
+        guard let raw = json[key] else { return }
+        if let v = raw as? T { setter(v) }
+        else { warnings.append("\(key): expected \(T.self), got \(type(of: raw))") }
+    }
+    load("pixelsPerClick")          { PIXELS_PER_CLICK = $0 }
+    load("friction")                { FRICTION = $0 }
+    load("maxVelocity")             { MAX_VELOCITY = $0 }
+    load("minVelocity")             { MIN_VELOCITY = $0 }
+    load("cancelOnMouseMoveThreshold") { CANCEL_ON_MOUSE_MOVE_THRESHOLD = $0 }
+    load("cancelOnMouseMove")       { CANCEL_ON_MOUSE_MOVE = $0 }
+    load("reverseScroll")           { REVERSE_MOUSE_SCROLL = $0 }
+    load("debug")                   { DEBUG_OVERLAY = $0 }
+    DebugOverlay.shared.setVisible(DEBUG_OVERLAY)
+    for w in warnings { log.warning("Config: \(w) — key ignored") }
+    log.info("Config loaded — pixelsPerClick:\(PIXELS_PER_CLICK) friction:\(FRICTION) maxVelocity:\(MAX_VELOCITY) minVelocity:\(MIN_VELOCITY) cancelOnMouseMove:\(CANCEL_ON_MOUSE_MOVE) threshold:\(CANCEL_ON_MOUSE_MOVE_THRESHOLD) reverseScroll:\(REVERSE_MOUSE_SCROLL)")
+}
+
+func writeDefaultConfig() {
+    let dir = (CONFIG_PATH as NSString).deletingLastPathComponent
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    guard !FileManager.default.fileExists(atPath: CONFIG_PATH) else { return }
+    let defaults: [String: Any] = [
+        "pixelsPerClick": PIXELS_PER_CLICK,
+        "friction": FRICTION,
+        "maxVelocity": MAX_VELOCITY,
+        "minVelocity": MIN_VELOCITY,
+        "cancelOnMouseMove": CANCEL_ON_MOUSE_MOVE,
+        "cancelOnMouseMoveThreshold": CANCEL_ON_MOUSE_MOVE_THRESHOLD,
+        "reverseScroll": REVERSE_MOUSE_SCROLL,
+        "debug": DEBUG_OVERLAY
+    ]
+    if let data = try? JSONSerialization.data(withJSONObject: defaults, options: .prettyPrinted) {
+        try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))
+        log.info("Default config written to \(CONFIG_PATH)")
+    }
+}
+
+var configWatcher: DispatchSourceFileSystemObject?
+var configReloadWork: DispatchWorkItem?
+
+func watchConfig() {
+    let dir = (CONFIG_PATH as NSString).deletingLastPathComponent
+    let fd = open(dir, O_EVTONLY)
+    guard fd >= 0 else { return }
+    let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
+    source.setEventHandler {
+        guard FileManager.default.fileExists(atPath: CONFIG_PATH) else { return }
+        configReloadWork?.cancel()
+        let work = DispatchWorkItem { loadConfig() }
+        configReloadWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+    }
+    source.setCancelHandler { close(fd) }
+    source.resume()
+    configWatcher = source
+}
+
+// MARK: - Debug Overlay
+
+// Circle drawn around cursor showing momentum state
+class CursorRingView: NSView {
+    var progress: CGFloat = 0  // 0 = idle, 1 = max velocity
+    var active: Bool = false
+
+    override func draw(_ rect: CGRect) {
+        guard active else { return }
+        let color = NSColor(hue: 0.33 * (1 - progress), saturation: 1, brightness: 1, alpha: 0.85)
+        color.setStroke()
+        let path = NSBezierPath(ovalIn: bounds.insetBy(dx: 2, dy: 2))
+        path.lineWidth = 2.5
+        path.stroke()
+    }
+}
+
+class DebugOverlay {
+    static let shared = DebugOverlay()
+    private var infoWindow: NSWindow?
+    private var label: NSTextField?
+    private var ringWindow: NSWindow?
+    private var ringView: CursorRingView?
+    private var mouseMonitor: Any?
+
+    func setVisible(_ visible: Bool) {
+        if visible { show() } else { hide() }
+    }
+
+    private func show() {
+        showInfo()
+        update()
+    }
+
+    private func hide() {
+        infoWindow?.orderOut(nil); infoWindow = nil; label = nil
+        ringWindow?.orderOut(nil); ringWindow = nil; ringView = nil
+    }
+
+    private func showInfo() {
+        guard infoWindow == nil else { return }
+        let w = NSWindow(
+            contentRect: NSRect(x: 20, y: 20, width: 300, height: 185),
+            styleMask: .borderless, backing: .buffered, defer: false
+        )
+        w.level = .floating
+        w.backgroundColor = NSColor.black.withAlphaComponent(0.75)
+        w.isOpaque = false
+        w.ignoresMouseEvents = true
+        w.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        w.contentView?.wantsLayer = true
+        w.contentView?.layer?.cornerRadius = 10
+        let field = NSTextField(frame: w.contentView!.bounds.insetBy(dx: 10, dy: 10))
+        field.isEditable = false; field.isBordered = false; field.drawsBackground = false
+        field.textColor = .white
+        field.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        field.autoresizingMask = [.width, .height]
+        w.contentView?.addSubview(field)
+        w.makeKeyAndOrderFront(nil)
+        infoWindow = w; label = field
+    }
+
+    private func showRing(at origin: CGPoint, radius: CGFloat) {
+        let size = radius * 2
+        let frame = NSRect(x: origin.x - radius, y: origin.y - radius, width: size, height: size)
+        if let w = ringWindow { w.setFrame(frame, display: true); return }
+        let w = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        w.level = .screenSaver
+        w.backgroundColor = .clear
+        w.isOpaque = false
+        w.ignoresMouseEvents = true
+        w.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        let v = CursorRingView(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        w.contentView?.addSubview(v)
+        w.makeKeyAndOrderFront(nil)
+        ringWindow = w; ringView = v
+    }
+
+    func update() {
+        guard infoWindow != nil else { return }
+        let isActive = velocity != 0
+        let progress = CGFloat(min(abs(velocity) / MAX_VELOCITY, 1.0))
+        let state = isActive ? String(format: "%.0f px/s", abs(velocity)) : "idle"
+
+        label?.stringValue = """
+        Moose debug
+        ────────────────────────────
+        velocity      \(state)
+        ────────────────────────────
+        pixelsPerClick  \(Int(PIXELS_PER_CLICK))
+        friction        \(FRICTION)
+        maxVelocity     \(Int(MAX_VELOCITY))
+        minVelocity     \(Int(MIN_VELOCITY))
+        reverseScroll   \(REVERSE_MOUSE_SCROLL)
+        cancelOnMove    \(CANCEL_ON_MOUSE_MOVE ? "✓ enabled (\(Int(CANCEL_ON_MOUSE_MOVE_THRESHOLD))px)" : "✗ disabled")
+        """
+
+        if CANCEL_ON_MOUSE_MOVE && isActive {
+            showRing(at: scrollOrigin, radius: CGFloat(CANCEL_ON_MOUSE_MOVE_THRESHOLD))
+            ringView?.active = true
+            ringView?.progress = progress
+            ringView?.needsDisplay = true
+        } else {
+            ringWindow?.orderOut(nil); ringWindow = nil; ringView = nil
+        }
+    }
+}
+
+var velocity: Double        = 0.0
 var displayLink: CADisplayLink?
-var scrollEventSource     = CGEventSource(stateID: .combinedSessionState)
-var scrollOrigin: CGPoint = .zero
+var scrollEventSource       = CGEventSource(stateID: .combinedSessionState)
+var scrollOrigin: CGPoint   = .zero
 
 class ScrollDriver: NSObject {
     @objc func tick(_ link: CADisplayLink) {
@@ -50,6 +239,7 @@ class ScrollDriver: NSObject {
         // exact integral of v(t)=v0·e^(-F·t) over [0,dt] — no stepping artifact
         let delta = velocity * (1.0 - decay) / FRICTION
         velocity *= decay
+        if DEBUG_OVERLAY { DebugOverlay.shared.update() }
         postSyntheticScroll(deltaY: delta)
     }
 }
@@ -67,7 +257,8 @@ func postSyntheticScroll(deltaY: Double) {
     let pos = NSEvent.mouseLocation
     let dx = pos.x - scrollOrigin.x
     let dy = pos.y - scrollOrigin.y
-    let movedWindow = CANCEL_ON_MOUSE_MOVE && dx * dx + dy * dy > 2500
+    let t = CANCEL_ON_MOUSE_MOVE_THRESHOLD
+    let movedWindow = CANCEL_ON_MOUSE_MOVE && dx * dx + dy * dy > t * t
     let switchedApp = currentApp != scrollApp
     let cmdHeld     = CGEventSource.flagsState(.combinedSessionState).contains(.maskCommand)
     if movedWindow || switchedApp || cmdHeld {
@@ -91,6 +282,7 @@ func cancelMomentum() {
     displayLink?.invalidate()
     displayLink = nil
     velocity = 0
+    if DEBUG_OVERLAY { DebugOverlay.shared.update() }
 }
 
 func startMomentum(origin: CGPoint) {
@@ -208,6 +400,10 @@ func installTap() {
     setupMouseDetection()
     log.info("Moose running — tap disabled until external mouse detected.")
 }
+
+writeDefaultConfig()
+loadConfig()
+watchConfig()
 
 let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
 if AXIsProcessTrustedWithOptions(options) {

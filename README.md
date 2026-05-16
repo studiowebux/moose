@@ -7,7 +7,9 @@ Fixes scroll wheel behavior for non-Apple mice on macOS. Replaces Apple's errati
 - **Zero CPU at idle** — the event tap is fully disabled when no external mouse is connected
 - **Auto-detects USB and Bluetooth mice** — tap enables on plug-in, disables on unplug
 - **Momentum scrolling** — glides to a smooth stop after each wheel spin
-- **No leaking** — momentum cancels on app switch, CMD+Tab, or moving the cursor to another window
+- **No leaking** — momentum cancels on app switch and CMD+Tab
+- **Live config** — edit `~/Library/Application Support/moose/config.json` and changes apply instantly, no restart needed
+- **Debug overlay** — floating HUD with live velocity, config values, and cancel-radius circle
 
 ## Requirements
 
@@ -49,38 +51,41 @@ make restart
 
 ## Tuning
 
-All settings are at the top of `Moose.swift`. Edit then `make uninstall && make clean && make && make install`.
+Moose reads its config from:
 
-```swift
-let PIXELS_PER_CLICK: Double = 300.0
 ```
-Velocity impulse added per wheel tick, in pixels/sec. Think of this as how hard each tick "kicks" the scroll.
-- `150` — light, short flicks
-- `300` — default, Apple-like feel
-- `500` — heavy, each tick sends you flying
+~/Library/Application Support/moose/config.json
+```
 
-```swift
-let FRICTION: Double = 2.5
+The file is created automatically with defaults on first run. Edit it with any text editor — changes apply instantly, no restart needed.
+
+```json
+{
+  "pixelsPerClick": 200,
+  "friction": 3.5,
+  "maxVelocity": 3000,
+  "minVelocity": 25,
+  "cancelOnMouseMove": false,
+  "reverseScroll": false
+}
 ```
-Deceleration rate. The glide half-life is `ln(2) / FRICTION` seconds — how long it takes to lose half its speed.
+
+| Key | Default | Description |
+|---|---|---|
+| `pixelsPerClick` | `200` | Velocity impulse per wheel tick (px/sec). Higher = faster scroll per detent. |
+| `friction` | `3.5` | Deceleration rate. Half-life = `ln(2) / friction` sec. Higher = stops sooner. |
+| `maxVelocity` | `3000` | Speed cap in px/sec. Prevents runaway on fast spins. |
+| `minVelocity` | `25` | Cutoff threshold. Momentum stops below this. Higher = cleaner stop, less tail. |
+| `cancelOnMouseMove` | `false` | Cancel momentum if the cursor moves beyond the threshold during a glide. |
+| `cancelOnMouseMoveThreshold` | `50` | Radius in px before momentum cancels (only used when `cancelOnMouseMove` is `true`). |
+| `reverseScroll` | `false` | Flip scroll direction for the mouse wheel only. Trackpad unaffected. |
+| `debug` | `false` | Show a live debug overlay with current velocity and config values. When `cancelOnMouseMove` is enabled, a circle is drawn at the scroll origin showing the cancel radius — green at low velocity, red near max. |
+
+**Friction reference:**
 - `1.0` — very long glide (~700 ms half-life), floaty
-- `2.5` — default, matches Apple trackpad momentum
-- `5.0` — snappy, stops quickly (~140 ms half-life)
-
-```swift
-let MAX_VELOCITY: Double = 4000.0
-```
-Speed cap in pixels/sec. Prevents runaway scrolling when spinning the wheel rapidly.
-
-```swift
-let CANCEL_ON_MOUSE_MOVE: Bool = false
-```
-When `true`, moving the cursor during a glide cancels the momentum immediately. Default is `false` — momentum continues even if you move the mouse, which avoids side effects when nudging the mouse while reading.
-
-```swift
-let REVERSE_MOUSE_SCROLL: Bool = false
-```
-Flip scroll direction for the mouse wheel only. Trackpad direction is unaffected.
+- `2.5` — Apple trackpad feel (~280 ms half-life)
+- `3.5` — default, snappier than trackpad
+- `5.0` — short snap (~140 ms half-life)
 
 ## Troubleshooting
 
