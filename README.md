@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/moose.png" alt="Moose logo" width="160">
+</p>
+
 # Moose
 
 > The wheel was invented 5000 years ago. This is just a reminder.
