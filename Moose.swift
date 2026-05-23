@@ -23,7 +23,7 @@ import OSLog
 import QuartzCore
 
 let log = Logger(subsystem: "com.studiowebux.moose", category: "scroll")
-let MOOSE_VERSION = "1.2.1"
+let MOOSE_VERSION = "1.2.2"
 
 // MARK: - Config
 
@@ -335,14 +335,14 @@ let tapCallback: CGEventTapCallBack = { proxy, type, event, _ in
         }
         return nil
     }
-    guard type == .scrollWheel else { return Unmanaged.passRetained(event) }
+    guard type == .scrollWheel else { return Unmanaged.passUnretained(event) }
     let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous)
-    guard isContinuous == 0 else { return Unmanaged.passRetained(event) }
+    guard isContinuous == 0 else { return Unmanaged.passUnretained(event) }
     let deltaY = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
     let scrollCount = event.getIntegerValueField(.scrollWheelEventScrollCount)
     // scrollCount is an unsigned detent count — reapply the sign from the signed delta
     let rawY = (scrollCount != 0 && deltaY != 0) ? scrollCount * (deltaY < 0 ? -1 : 1) : deltaY
-    guard rawY != 0 else { return Unmanaged.passRetained(event) }
+    guard rawY != 0 else { return Unmanaged.passUnretained(event) }
     let direction: Double = REVERSE_MOUSE_SCROLL ? -1.0 : 1.0
     let impulse = Double(rawY) * PIXELS_PER_CLICK * direction
     if velocity != 0 && (impulse > 0) != (velocity > 0) { cancelMomentum() }
